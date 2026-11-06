@@ -3,10 +3,23 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@supabase/supabase-js": "^2.119.0",
     "expo": "~58.0.23",
+    "expo-background-task": "~58.0.12",
+    "expo-clipboard": "~58.0.4",
+    "expo-linear-gradient": "~58.0.3",
+    "expo-notifications": "~58.1.8",
     "expo-status-bar": "~58.0.4",
+    "expo-task-manager": "~58.0.13",
+    "lucide-react-native": "^1.70.0",
     "react": "19.3.0",
-    "react-native": "0.88.1"
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-svg": "15.16.0",
+    "react-native-url-polyfill": "^4.0.0",
+    "react-native-web": "^0.21.4"
   },
   "devDependencies": {
     "@types/react": "~19.3.0",
@@ -16,7 +29,11 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/stream-and-chat.test.mjs && node test/markdown.test.mjs && node test/admin-rule.test.mjs && node test/meeting-watch.test.mjs",
+    "mock": "node test/mock-gateway.mjs"
   },
-  "private": true
+  "private": true,
+  "description": "Admin WAE Bot: the React Native (Expo) app of WAE Bot for admins (chat, background runs, meeting notes)."
 }

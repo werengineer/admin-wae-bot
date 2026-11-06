@@ -1,15 +1,18 @@
 {
   "expo": {
-    "name": "admin-wae-bot-app",
+    "name": "Admin WAE Bot",
     "slug": "admin-wae-bot-app",
+    "scheme": "adminwaebot",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "company.wae.adminwaebot"
     },
     "android": {
+      "package": "company.wae.adminwaebot",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,6 +23,10 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-background-task",
+      ["expo-notifications", { "enableRemoteNotifications": false }]
+    ]
   }
 }
