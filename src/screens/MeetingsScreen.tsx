@@ -3,7 +3,7 @@
 // same texts, same rules for the buttons, same values sent to the server. The web page edits type, project, deadline and priority in the cells of a
 // table; on a phone the pencil of a task opens one window for all of them.
 import AsyncStorage from "@react-native-async-storage/async-storage"
-import { ChevronDown, ChevronRight, Pencil, Trash2 } from "lucide-react-native"
+import { ChevronDown, ChevronRight, Circle, CircleCheck, CircleSlash, CircleX, LoaderCircle, Pencil, Trash2 } from "lucide-react-native"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { AppState, Modal, Pressable, RefreshControl, ScrollView, Text, View } from "react-native"
 import { call, errorOf } from "../api"
@@ -16,7 +16,10 @@ import type { Bot } from "../use-bot"
 import type { usePublish } from "../use-publish"
 
 type Kind = "development" | "marketing" | "other"
-type Task = { id: string; employee: string; task: string; project: string; deadline: string; priority: string; kind: Kind; status: "new" | "started"; runId: string }
+type RunState = "running" | "done" | "error" | "stopped"
+// runState: how the background run of a started task is going (sent by the server with every list; empty = not started, or an older server)
+type Task = { id: string; employee: string; task: string; project: string; deadline: string; priority: string; kind: Kind; status: "new" | "started"; runId: string; runState?: RunState | "" }
+type Progress = "todo" | RunState
 type Meeting = { id: string; name: string; source: string; receivedAt: string; tasks: Task[]; unassigned: string[] }
 type Project = { id: string; name: string }
 
@@ -28,6 +31,22 @@ const TASK_LIMIT = 600
 
 function kindColors(t: Theme, k: Kind) {
   return k === "development" ? { fg: t.blue, bg: t.blueBg, border: t.blueBorder } : k === "marketing" ? { fg: t.orange, bg: t.orangeBg, border: t.orangeBorder } : { fg: t.mutedFg, bg: t.muted, border: t.border }
+}
+
+// where a task stands: not started, WAE Bot is working on it, or how its run ended (the same as the web page)
+function progressOf(task: Task): Progress {
+  if (task.status !== "started") return "todo"
+  return task.runState || "running" // an older server does not say: started = running
+}
+const PROGRESS_LABEL: Record<Progress, string> = { todo: "Not started", running: "Running in background", done: "Completed", error: "Failed", stopped: "Stopped" }
+function progressColor(t: Theme, p: Progress) {
+  return p === "done" ? t.ok : p === "running" ? t.blue : p === "error" ? t.destructive : p === "stopped" ? t.orange : t.mutedFg
+}
+function ProgressIcon({ p, size = 18 }: { p: Progress; size?: number }) {
+  const t = useTheme()
+  const color = progressColor(t, p)
+  const Icon = p === "done" ? CircleCheck : p === "running" ? LoaderCircle : p === "error" ? CircleX : p === "stopped" ? CircleSlash : Circle
+  return <Icon size={size} color={color} />
 }
 
 // Why "Do it with WAE Bot" cannot be pressed yet (empty = it can)
@@ -116,11 +135,24 @@ export function MeetingsScreen({
     }
   }, [showTab])
 
+  // while a task is running, its state is read every 5 s so it turns "Completed" soon after the run ends; otherwise every 15 s
+  // An older bot server does not send how a started task's run is going (runState). Then the chat list tells it: the chat is still
+  // answering with that run = running; the chat keeps that run as its last one = it reached its end = done. (Same as the web page.)
+  const prog = (x: Task): Progress => {
+    if (x.status === "started" && !x.runState && x.runId) {
+      const chat = bot.chatOfRun(x.runId)
+      if (chat) return chat.running && chat.runId === x.runId ? "running" : "done"
+    }
+    return progressOf(x)
+  }
+  const anyRunning = meetings.some((m) => m.tasks.some((x) => prog(x) === "running"))
   useEffect(() => {
     load()
-    const timer = setInterval(() => AppState.currentState === "active" && load(), 15000)
-    return () => clearInterval(timer)
   }, [load])
+  useEffect(() => {
+    const timer = setInterval(() => AppState.currentState === "active" && load(), anyRunning ? 5000 : 15000)
+    return () => clearInterval(timer)
+  }, [load, anyRunning])
 
   const unreadIds = new Set(meetings.filter((m) => m.source !== "pasted" && Date.parse(m.receivedAt) > seenAt).map((m) => m.id))
   useEffect(() => onUnread(unreadIds.size), [unreadIds.size, onUnread]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -174,6 +206,17 @@ export function MeetingsScreen({
       setTimeout(bot.loadSessions, 8000)
     }
   }
+  // the task was done some other way (by a person, or after a run that failed): it becomes Completed and is locked for good
+  const markDone = (m: Meeting, task: Task) =>
+    confirm("Mark as done", "Mark this task as completed? It is locked after this and cannot be edited.", "Mark as done", async () => {
+      try {
+        const res = await call("meeting-update", { body: { meetingId: m.id, taskId: task.id, markDone: true } })
+        if (!res.ok) throw new Error(res.status === 409 ? "The bot server is an older version that cannot mark tasks done yet. Update it, then try again." : await errorOf(res))
+        await load()
+      } catch (e: any) {
+        toast.error(e?.message || "Could not mark the task done.")
+      }
+    })
   const removeTask = (m: Meeting, task: Task) =>
     confirm("Remove task", "Remove this task from the list?", "Remove", () => void send("meeting-update", { meetingId: m.id, taskId: task.id, delete: true }, "Could not remove the task."), true)
   const removeMeeting = (m: Meeting) => {
@@ -203,7 +246,9 @@ export function MeetingsScreen({
         ) : null}
 
         {meetings.map((m, index) => {
-          const started = m.tasks.filter((x) => x.status === "started").length
+          const counts = { todo: 0, running: 0, done: 0, error: 0, stopped: 0 }
+          for (const x of m.tasks) counts[prog(x)]++
+          const total = m.tasks.length
           const open = openIds[m.id] ?? (index === 0 || unreadIds.has(m.id))
           const Chevron = open ? ChevronDown : ChevronRight
           return (
@@ -222,8 +267,20 @@ export function MeetingsScreen({
                     <Text numberOfLines={open ? 2 : 1} style={{ flex: 1, color: t.fg, fontWeight: "600", fontSize: 16 }}>{m.name}</Text>
                   </View>
                   <Text style={{ color: t.mutedFg, fontSize: 12, paddingLeft: 26 }}>
-                    {SOURCE[m.source] || m.source} · {whenText(m.receivedAt)} · {m.tasks.length} tasks{started ? `, ${started} started` : ""}
+                    {SOURCE[m.source] || m.source} · {whenText(m.receivedAt)}
                   </Text>
+                  {total > 0 ? (
+                    <View style={[s.row, { paddingLeft: 26, gap: 8 }]}>
+                      <View style={{ width: 64, height: 6, borderRadius: 3, backgroundColor: t.muted, overflow: "hidden" }}>
+                        <View style={{ width: `${(counts.done / total) * 100}%`, height: "100%", backgroundColor: t.ok }} />
+                      </View>
+                      <Text style={{ color: t.mutedFg, fontSize: 12, flexShrink: 1 }}>
+                        <Text style={{ color: t.fg, fontWeight: "600" }}>{counts.done}</Text>/{total} completed
+                        {counts.running ? <Text style={{ color: t.blue }}> · {counts.running} running</Text> : null}
+                        {counts.error + counts.stopped ? <Text style={{ color: t.destructive }}> · {counts.error + counts.stopped} failed/stopped</Text> : null}
+                      </Text>
+                    </View>
+                  ) : null}
                 </Pressable>
                 <IconBtn label="Remove this meeting" onPress={() => removeMeeting(m)}><Trash2 size={16} color={t.mutedFg} /></IconBtn>
               </View>
@@ -234,25 +291,31 @@ export function MeetingsScreen({
                 const chat = task.runId ? bot.chatOfRun(task.runId) : undefined
                 const blocked = whyNot(task, marketing)
                 const busy = starting.has(task.id)
+                const progress = prog(task)
+                const done = progress === "done"
                 return (
-                  <View key={task.id} style={{ borderTopWidth: 1, borderColor: t.border, paddingTop: 12, gap: 8 }}>
+                  <View key={task.id} style={{ borderTopWidth: 1, borderColor: t.border, paddingTop: 12, gap: 8, opacity: done ? 0.75 : 1 }}>
                     <View style={s.wrap}>
+                      <View accessibilityLabel={PROGRESS_LABEL[progress]} style={[s.row, { gap: 4 }]}>
+                        <ProgressIcon p={progress} size={16} />
+                        <Text style={{ color: progressColor(t, progress), fontSize: 12, fontWeight: "600" }}>{PROGRESS_LABEL[progress]}</Text>
+                      </View>
                       <Text style={{ color: kc.fg, backgroundColor: kc.bg, borderColor: kc.border, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 3, fontSize: 12, fontWeight: "600", overflow: "hidden" }}>{KIND_LABEL[task.kind]}</Text>
                       {task.kind === "development" && task.project ? <Pill text={task.project} /> : null}
                       {task.kind === "marketing" ? <Pill text="Marketing folder" /> : null}
                       {task.priority ? <Pill text={task.priority} /> : null}
                       {task.deadline ? <Pill text={`Due ${task.deadline}`} /> : null}
                     </View>
-                    <Text selectable style={{ color: t.fg, fontSize: 15, lineHeight: 22 }}>{task.task}</Text>
+                    <Text selectable style={{ color: done ? t.mutedFg : t.fg, fontSize: 15, lineHeight: 22, textDecorationLine: done ? "line-through" : "none" }}>{task.task}</Text>
                     {task.status === "started" ? (
                       <View style={{ gap: 6 }}>
-                        <View style={s.row}>
-                          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: t.primary }} />
-                          <Text style={{ color: t.primary, fontSize: 13, fontWeight: "500" }}>Started in background</Text>
-                        </View>
+                        {progress === "error" || progress === "stopped" ? (
+                          <Text style={{ color: t.mutedFg, fontSize: 12 }}>Open the chat to see what happened or carry on.</Text>
+                        ) : null}
                         <View style={[s.row, { flexWrap: "wrap" }]}>
-                          <Btn small variant="outline" label="Open chat" disabled={!chat} onPress={() => openChat(task.runId)} />
-                          {!chat ? <Text style={{ color: t.mutedFg, fontSize: 11, flexShrink: 1 }}>The chat shows up in Recents in a few seconds</Text> : null}
+                          {task.runId ? <Btn small variant="outline" label="Open chat" disabled={!chat} onPress={() => openChat(task.runId)} /> : null}
+                          {!done ? <Btn small variant="outline" label="Mark as done" onPress={() => markDone(m, task)} /> : null}
+                          {task.runId && !chat ? <Text style={{ color: t.mutedFg, fontSize: 11, flexShrink: 1 }}>The chat shows up in Recents in a few seconds</Text> : null}
                         </View>
                       </View>
                     ) : (
@@ -264,6 +327,7 @@ export function MeetingsScreen({
                           <IconBtn label="Remove this task" onPress={() => removeTask(m, task)} style={{ borderWidth: 1, borderColor: t.border, padding: 9 }}><Trash2 size={17} color={t.destructive} /></IconBtn>
                         </View>
                         {blocked ? <Text style={{ color: t.mutedFg, fontSize: 11 }}>{blocked}</Text> : null}
+                        <Btn small variant="outline" label="Mark as done" onPress={() => markDone(m, task)} style={{ alignSelf: "flex-start" }} />
                       </View>
                     )}
                   </View>
