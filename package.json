@@ -31,7 +31,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "node test/stream-and-chat.test.mjs && node test/markdown.test.mjs && node test/admin-rule.test.mjs && node test/meeting-watch.test.mjs",
+    "test": "node test/stream-and-chat.test.mjs && node test/markdown.test.mjs && node test/admin-rule.test.mjs && node test/meeting-watch.test.mjs && node test/schedule.test.mjs",
     "mock": "node test/mock-gateway.mjs"
   },
   "private": true,

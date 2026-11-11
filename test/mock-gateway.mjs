@@ -76,11 +76,22 @@ http.createServer((req, res) => {
         else if (b.patch) Object.assign(m.tasks.find((t) => t.id === b.taskId) || {}, b.patch)
         return json(res, 200, { ok: true })
       }
-      case "meeting-task-start": {
+      // like the real server: Approve runs the task now, or keeps it "approved" until its run time; Reject takes it back
+      case "meeting-task-approve": {
         const t = meetings[0].tasks.find((x) => x.id === b.taskId)
-        if (t) { t.status = "started"; t.runId = "run-new" }
-        sessions.unshift({ id: "s-new", envId: "dev", title: t?.task || "task", updatedAt: Date.now(), running: true, runId: "run-new", projectName: t?.project })
-        return json(res, 200, { ok: true, runId: "run-new" })
+        if (!t) return json(res, 404, { error: "Task not found." })
+        if (t.kind === "other") return json(res, 400, { error: "Set the type of this task to Development or Marketing first." })
+        if ("runAt" in b) t.runAt = b.runAt || ""
+        if (t.runAt && Date.parse(t.runAt) > Date.now()) { t.status = "approved"; return json(res, 200, { ok: true, status: "approved", runAt: t.runAt }) }
+        t.status = "started"; t.runId = "run-new"
+        sessions.unshift({ id: "s-new", envId: "dev", title: t.task, updatedAt: Date.now(), running: true, runId: "run-new", projectName: t.project })
+        return json(res, 200, { ok: true, status: "started", runId: "run-new" })
+      }
+      case "meeting-task-reject": {
+        const t = meetings[0].tasks.find((x) => x.id === b.taskId)
+        if (!t) return json(res, 404, { error: "Task not found." })
+        t.status = "rejected"
+        return json(res, 200, { ok: true, status: "rejected" })
       }
       case "allow-rules": return json(res, 200, { rules: [{ id: "r1", label: "Always allow npm test", cwd: "/srv/wae/repos/academy" }] })
       case "allow-rules/delete": return json(res, 200, { ok: true })

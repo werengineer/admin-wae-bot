@@ -1,14 +1,16 @@
 // Meeting notes: meetings arrive by themselves (Wispr Flow), already split into tasks, each labelled Development / Marketing / Other.
-// Nothing starts by itself: work starts only when "Do it with WAE Bot" is pressed on a task. Same as the web page (components/wae-bot/meetings-panel.tsx):
+// Each task shows Approve / Reject as soon as it is found. Nothing starts before it is approved; an approved task runs by itself in the background
+// at its run time. Same as the web page (components/wae-bot/meetings-panel.tsx):
 // same texts, same rules for the buttons, same values sent to the server. The web page edits type, project, deadline and priority in the cells of a
 // table; on a phone the pencil of a task opens one window for all of them.
 import AsyncStorage from "@react-native-async-storage/async-storage"
-import { ChevronDown, ChevronRight, Circle, CircleCheck, CircleSlash, CircleX, LoaderCircle, Pencil, Trash2 } from "lucide-react-native"
+import { Ban, ChevronDown, ChevronRight, Circle, CircleCheck, CircleSlash, CircleX, Clock, LoaderCircle, Pencil, Trash2 } from "lucide-react-native"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { AppState, Modal, Pressable, RefreshControl, ScrollView, Text, View } from "react-native"
 import { call, errorOf } from "../api"
 import { confirm } from "../confirm"
 import { processMeetings } from "../meeting-check"
+import { parseLocalText, quickTimes, toLocalText } from "../schedule"
 import { Banner, Btn, Chip, Field, IconBtn, s } from "../components/ui"
 import { radius, useTheme, type Theme } from "../theme"
 import { toast } from "../toast"
@@ -18,8 +20,10 @@ import type { usePublish } from "../use-publish"
 type Kind = "development" | "marketing" | "other"
 type RunState = "running" | "done" | "error" | "stopped"
 // runState: how the background run of a started task is going (sent by the server with every list; empty = not started, or an older server)
-type Task = { id: string; employee: string; task: string; project: string; deadline: string; priority: string; kind: Kind; status: "new" | "started"; runId: string; runState?: RunState | "" }
-type Progress = "todo" | RunState
+// status: new = waits for Approve / Reject; approved = runs by itself at runAt; rejected; started = the background run was started
+// runAt: ISO time, empty = right after it is approved. startError: an approved task that could not start went back to waiting; this says why
+type Task = { id: string; employee: string; task: string; project: string; projects?: string[]; deadline: string; priority: string; kind: Kind; status: "new" | "approved" | "rejected" | "started"; runId: string; runAt?: string; startError?: string; runState?: RunState | "" }
+type Progress = "todo" | "approved" | "rejected" | RunState
 type Meeting = { id: string; name: string; source: string; receivedAt: string; tasks: Task[]; unassigned: string[] }
 type Project = { id: string; name: string }
 
@@ -33,26 +37,31 @@ function kindColors(t: Theme, k: Kind) {
   return k === "development" ? { fg: t.blue, bg: t.blueBg, border: t.blueBorder } : k === "marketing" ? { fg: t.orange, bg: t.orangeBg, border: t.orangeBorder } : { fg: t.mutedFg, bg: t.muted, border: t.border }
 }
 
-// where a task stands: not started, WAE Bot is working on it, or how its run ended (the same as the web page)
+// where a task stands: waiting for approval, approved (will run by itself), rejected, WAE Bot is working on it, or how its run ended
 function progressOf(task: Task): Progress {
+  if (task.status === "approved") return "approved"
+  if (task.status === "rejected") return "rejected"
   if (task.status !== "started") return "todo"
   return task.runState || "running" // an older server does not say: started = running
 }
-const PROGRESS_LABEL: Record<Progress, string> = { todo: "Not started", running: "Running in background", done: "Completed", error: "Failed", stopped: "Stopped" }
+const PROGRESS_LABEL: Record<Progress, string> = { todo: "Waiting for approval", approved: "Approved", rejected: "Rejected", running: "Running in background", done: "Completed", error: "Failed", stopped: "Stopped" }
 function progressColor(t: Theme, p: Progress) {
-  return p === "done" ? t.ok : p === "running" ? t.blue : p === "error" ? t.destructive : p === "stopped" ? t.orange : t.mutedFg
+  return p === "done" ? t.ok : p === "running" || p === "approved" ? t.blue : p === "error" ? t.destructive : p === "stopped" ? t.orange : t.mutedFg
 }
 function ProgressIcon({ p, size = 18 }: { p: Progress; size?: number }) {
   const t = useTheme()
   const color = progressColor(t, p)
-  const Icon = p === "done" ? CircleCheck : p === "running" ? LoaderCircle : p === "error" ? CircleX : p === "stopped" ? CircleSlash : Circle
+  const Icon = p === "done" ? CircleCheck : p === "running" ? LoaderCircle : p === "approved" ? Clock : p === "rejected" ? Ban : p === "error" ? CircleX : p === "stopped" ? CircleSlash : Circle
   return <Icon size={size} color={color} />
 }
 
-// Why "Do it with WAE Bot" cannot be pressed yet (empty = it can)
+// the projects of a task: a task can be about several (a task from an older bot server has only the single "project")
+const projectsOf = (t: Task): string[] => t.projects ?? (t.project ? [t.project] : [])
+
+// Why Approve cannot be pressed yet (empty = it can)
 function whyNot(t: Task, marketing: boolean): string {
   if (t.kind === "other") return "Set the type to Development or Marketing first."
-  if (t.kind === "development" && !t.project) return "Choose a project first."
+  if (t.kind === "development" && projectsOf(t).length === 0) return "Choose at least one project first."
   if (t.kind === "marketing" && !marketing) return "There is no Marketing folder on the server."
   if (!t.task.trim()) return "Write the task first."
   return ""
@@ -190,21 +199,34 @@ export function MeetingsScreen({
     }
   }
 
-  const start = async (m: Meeting, task: Task) => {
+  // Approve: the task runs by itself in the background at its run time (right away when it has none)
+  const approve = async (m: Meeting, task: Task) => {
     if (whyNot(task, marketing) || starting.has(task.id)) return
     setStarting((prev) => new Set(prev).add(task.id))
-    const ok = await send("meeting-task-start", { meetingId: m.id, taskId: task.id, model: bot.modelId, effort: bot.effortId, autoAllow: bot.autoAllow }, "Could not start this task.")
+    const out = await send("meeting-task-approve", { meetingId: m.id, taskId: task.id, model: bot.modelId, effort: bot.effortId, autoAllow: bot.autoAllow }, "Could not approve this task.")
     setStarting((prev) => {
       const next = new Set(prev)
       next.delete(task.id)
       return next
     })
-    if (ok) {
-      toast.info("Started in the background. It is in Recents (the dot shows it is answering).")
+    if (out) {
+      if (out.status === "started") toast.info("Approved. It started in the background. It is in Recents (the dot shows it is answering).")
+      else toast.info(out.runAt ? `Approved. It will start by itself at ${whenText(out.runAt)}.` : "Approved. It starts in a moment.")
       // the chat shows up in Recents a moment after it starts
       setTimeout(bot.loadSessions, 3000)
       setTimeout(bot.loadSessions, 8000)
     }
+  }
+  // Reject: the task is not done by WAE Bot (an approved one that has not started is taken back)
+  const reject = async (m: Meeting, task: Task) => {
+    if (starting.has(task.id)) return
+    setStarting((prev) => new Set(prev).add(task.id))
+    await send("meeting-task-reject", { meetingId: m.id, taskId: task.id }, "Could not reject this task.")
+    setStarting((prev) => {
+      const next = new Set(prev)
+      next.delete(task.id)
+      return next
+    })
   }
   // the task was done some other way (by a person, or after a run that failed): it becomes Completed and is locked for good
   const markDone = (m: Meeting, task: Task) =>
@@ -246,7 +268,7 @@ export function MeetingsScreen({
         ) : null}
 
         {meetings.map((m, index) => {
-          const counts = { todo: 0, running: 0, done: 0, error: 0, stopped: 0 }
+          const counts = { todo: 0, approved: 0, rejected: 0, running: 0, done: 0, error: 0, stopped: 0 }
           for (const x of m.tasks) counts[prog(x)]++
           const total = m.tasks.length
           const open = openIds[m.id] ?? (index === 0 || unreadIds.has(m.id))
@@ -276,6 +298,8 @@ export function MeetingsScreen({
                       </View>
                       <Text style={{ color: t.mutedFg, fontSize: 12, flexShrink: 1 }}>
                         <Text style={{ color: t.fg, fontWeight: "600" }}>{counts.done}</Text>/{total} completed
+                        {counts.todo ? <Text> · {counts.todo} to approve</Text> : null}
+                        {counts.approved ? <Text style={{ color: t.blue }}> · {counts.approved} approved</Text> : null}
                         {counts.running ? <Text style={{ color: t.blue }}> · {counts.running} running</Text> : null}
                         {counts.error + counts.stopped ? <Text style={{ color: t.destructive }}> · {counts.error + counts.stopped} failed/stopped</Text> : null}
                       </Text>
@@ -301,10 +325,11 @@ export function MeetingsScreen({
                         <Text style={{ color: progressColor(t, progress), fontSize: 12, fontWeight: "600" }}>{PROGRESS_LABEL[progress]}</Text>
                       </View>
                       <Text style={{ color: kc.fg, backgroundColor: kc.bg, borderColor: kc.border, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 3, fontSize: 12, fontWeight: "600", overflow: "hidden" }}>{KIND_LABEL[task.kind]}</Text>
-                      {task.kind === "development" && task.project ? <Pill text={task.project} /> : null}
+                      {task.kind === "development" ? projectsOf(task).map((p) => <Pill key={p} text={p} />) : null}
                       {task.kind === "marketing" ? <Pill text="Marketing folder" /> : null}
                       {task.priority ? <Pill text={task.priority} /> : null}
                       {task.deadline ? <Pill text={`Due ${task.deadline}`} /> : null}
+                      {task.runAt && task.status !== "started" ? <Pill text={`Run time ${whenText(task.runAt)}`} /> : null}
                     </View>
                     <Text selectable style={{ color: done ? t.mutedFg : t.fg, fontSize: 15, lineHeight: 22, textDecorationLine: done ? "line-through" : "none" }}>{task.task}</Text>
                     {task.status === "started" ? (
@@ -318,15 +343,33 @@ export function MeetingsScreen({
                           {task.runId && !chat ? <Text style={{ color: t.mutedFg, fontSize: 11, flexShrink: 1 }}>The chat shows up in Recents in a few seconds</Text> : null}
                         </View>
                       </View>
+                    ) : task.status === "approved" ? (
+                      <View style={{ gap: 6 }}>
+                        <Text style={{ color: t.mutedFg, fontSize: 12 }}>
+                          {task.runAt && Date.parse(task.runAt) > Date.now() ? `Starts by itself at ${whenText(task.runAt)}, in the background.` : "Starting in a moment."}
+                        </Text>
+                        <View style={[s.row, { flexWrap: "wrap" }]}>
+                          <Btn small variant="outline" label={busy ? "Please wait…" : "Reject"} disabled={busy} onPress={() => reject(m, task)} />
+                          <IconBtn label="Change the run time" onPress={() => setEditing({ meetingId: m.id, task })} style={{ borderWidth: 1, borderColor: t.border, padding: 9 }}><Pencil size={17} color={t.fg} /></IconBtn>
+                        </View>
+                      </View>
                     ) : (
                       <View style={{ gap: 6 }}>
-                        {/* one row across the full width: the start button takes what the two icons leave */}
+                        {/* one row across the full width: Approve and Reject share what the two icons leave */}
                         <View style={[s.row, { gap: 8 }]}>
-                          <Btn small label={busy ? "Starting…" : "Do it with WAE Bot"} disabled={busy || !!blocked} onPress={() => start(m, task)} style={{ flex: 1 }} />
+                          {task.status === "rejected" ? (
+                            <Btn small variant="outline" label={busy ? "Please wait…" : "Approve instead"} disabled={busy || !!blocked} onPress={() => approve(m, task)} style={{ flex: 1 }} />
+                          ) : (
+                            <>
+                              <Btn small label={busy ? "Please wait…" : "Approve"} disabled={busy || !!blocked} onPress={() => approve(m, task)} style={{ flex: 1 }} />
+                              <Btn small variant="outline" label="Reject" disabled={busy} onPress={() => reject(m, task)} style={{ flex: 1 }} />
+                            </>
+                          )}
                           <IconBtn label="Edit this task" onPress={() => setEditing({ meetingId: m.id, task })} style={{ borderWidth: 1, borderColor: t.border, padding: 9 }}><Pencil size={17} color={t.fg} /></IconBtn>
                           <IconBtn label="Remove this task" onPress={() => removeTask(m, task)} style={{ borderWidth: 1, borderColor: t.border, padding: 9 }}><Trash2 size={17} color={t.destructive} /></IconBtn>
                         </View>
-                        {blocked ? <Text style={{ color: t.mutedFg, fontSize: 11 }}>{blocked}</Text> : null}
+                        {blocked && task.status !== "rejected" ? <Text style={{ color: t.mutedFg, fontSize: 11 }}>{blocked}</Text> : null}
+                        {task.startError ? <Text style={{ color: t.destructive, fontSize: 11 }}>It could not start: {task.startError}</Text> : null}
                         <Btn small variant="outline" label="Mark as done" onPress={() => markDone(m, task)} style={{ alignSelf: "flex-start" }} />
                       </View>
                     )}
@@ -413,13 +456,16 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
   const t = useTheme()
   const [text, setText] = useState(task.task)
   const [kind, setKind] = useState<Kind>(task.kind)
-  const [project, setProject] = useState(task.project)
+  const [picked, setPicked] = useState<string[]>(projectsOf(task))
   const [deadline, setDeadline] = useState(task.deadline)
   const [priority, setPriority] = useState(task.priority)
+  const [runText, setRunText] = useState(toLocalText(task.runAt))
   const [saving, setSaving] = useState(false)
+  const runIso = parseLocalText(runText) // "" = right after approval, null = not a date and time
   const names = projects.map((p) => p.name)
-  // a project the AI named that is not connected stays visible so it can be changed
-  const choices = task.project && !names.includes(task.project) ? [task.project, ...names] : names
+  // a project the AI named that is not connected stays visible so it can be unticked
+  const choices = [...projectsOf(task).filter((n) => !names.includes(n)), ...names]
+  const togglePicked = (p: string) => setPicked((list) => (list.includes(p) ? list.filter((x) => x !== p) : [...list, p]))
   const label = { color: t.mutedFg, fontSize: 12 } as const
 
   // only what was changed is sent, with the same rules as the page: a task that becomes Marketing has no project
@@ -427,11 +473,19 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
   if (text.trim() !== task.task) patch.task = text.trim()
   if (kind !== task.kind) {
     patch.kind = kind
-    if (kind === "marketing") patch.project = ""
+    if (kind === "marketing") {
+      patch.project = ""
+      patch.projects = []
+    }
   }
-  if (kind === "development" && project !== task.project) patch.project = project
+  // both fields are sent: a bot server that knows only the single project keeps the first one
+  if (kind === "development" && picked.join("") !== projectsOf(task).join("")) {
+    patch.projects = picked
+    patch.project = picked[0] ?? ""
+  }
   if (deadline !== task.deadline) patch.deadline = deadline
   if (priority !== task.priority) patch.priority = priority
+  if (runIso !== null && runIso !== (task.runAt || "")) patch.runAt = runIso
   const changed = Object.keys(patch).length > 0
 
   return (
@@ -439,7 +493,7 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
       <ScrollView style={{ flex: 1, backgroundColor: t.bg }} contentContainerStyle={{ padding: 16, gap: 14 }} keyboardShouldPersistTaps="handled">
         <Text style={{ color: t.fg, fontSize: 20, fontWeight: "600" }}>Edit task</Text>
         <Text style={{ color: t.mutedFg, fontSize: 13 }}>
-          {task.employee ? `Task of ${task.employee}. ` : ""}Change the words of the task. This is what WAE Bot gets when you press "Do it with WAE Bot".
+          {task.employee ? `Task of ${task.employee}. ` : ""}Change the words of the task. This is what WAE Bot gets when the task is approved.
         </Text>
         <Field label="Task" value={text} onChangeText={setText} maxLength={TASK_LIMIT} multiline style={{ minHeight: 120, textAlignVertical: "top" }} />
         <Text style={{ color: t.mutedFg, fontSize: 12, textAlign: "right" }}>{text.length}/{TASK_LIMIT}</Text>
@@ -451,10 +505,10 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
         </View>
         {kind === "development" ? (
           <>
-            <Text style={label}>Project</Text>
+            <Text style={label}>Projects (pick one or more)</Text>
             <View style={s.wrap}>
               {choices.map((p) => (
-                <Chip key={p} label={p} selected={project === p} onPress={() => setProject(p)} />
+                <Chip key={p} label={p} selected={picked.includes(p)} onPress={() => togglePicked(p)} />
               ))}
             </View>
           </>
@@ -466,11 +520,19 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
             <Chip key={p} label={p} selected={priority === p} onPress={() => setPriority(priority === p ? "" : p)} />
           ))}
         </View>
+        <Text style={label}>Run time (optional): an approved task starts by itself at this time, in the background. Empty = right after you approve it.</Text>
+        <View style={s.wrap}>
+          {quickTimes().map((q) => (
+            <Chip key={q.label} label={q.label} selected={runIso === q.iso && (q.iso !== "" || runText.trim() === "")} onPress={() => setRunText(toLocalText(q.iso))} />
+          ))}
+        </View>
+        <Field value={runText} onChangeText={setRunText} placeholder="YYYY-MM-DD HH:MM (your phone's time)" autoCapitalize="none" autoCorrect={false} />
+        {runIso === null ? <Text style={{ color: t.destructive, fontSize: 12 }}>That is not a date and time. Write it like 2026-11-10 21:00.</Text> : null}
         <View style={s.row}>
           <Btn
             label={saving ? "Saving…" : "Save"}
             busy={saving}
-            disabled={!text.trim() || !changed}
+            disabled={!text.trim() || !changed || runIso === null}
             onPress={async () => {
               setSaving(true)
               await onSave(patch)
