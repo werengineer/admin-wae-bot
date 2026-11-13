@@ -1,4 +1,4 @@
-// Meeting notes: meetings arrive by themselves (Wispr Flow), already split into tasks, each labelled Development / Marketing / Other.
+// Meeting notes: meetings arrive by themselves (Wispr Flow), already split into tasks, each labelled Development / Marketing / Content / Other.
 // Each task shows Approve / Reject as soon as it is found. Nothing starts before it is approved; an approved task runs by itself in the background
 // at its run time. Same as the web page (components/wae-bot/meetings-panel.tsx):
 // same texts, same rules for the buttons, same values sent to the server. The web page edits type, project, deadline and priority in the cells of a
@@ -17,7 +17,7 @@ import { toast } from "../toast"
 import type { Bot } from "../use-bot"
 import type { usePublish } from "../use-publish"
 
-type Kind = "development" | "marketing" | "other"
+type Kind = "development" | "marketing" | "content" | "other"
 type RunState = "running" | "done" | "error" | "stopped"
 // runState: how the background run of a started task is going (sent by the server with every list; empty = not started, or an older server)
 // status: new = waits for Approve / Reject; approved = runs by itself at runAt; rejected; started = the background run was started
@@ -27,14 +27,14 @@ type Progress = "todo" | "approved" | "rejected" | RunState
 type Meeting = { id: string; name: string; source: string; receivedAt: string; tasks: Task[]; unassigned: string[] }
 type Project = { id: string; name: string }
 
-const KIND_LABEL: Record<Kind, string> = { development: "Development", marketing: "Marketing", other: "Other" }
+const KIND_LABEL: Record<Kind, string> = { development: "Development", marketing: "Marketing", content: "Content", other: "Other" }
 const PRIORITIES = ["high", "medium", "low"] // the same values as the web page (they are stored and sent to the Sheet as they are)
 const SOURCE: Record<string, string> = { "wispr-flow": "Wispr Flow", pasted: "Pasted", inbox: "Automation" }
 const SEEN_KEY = "wae-bot-meetings-seen"
 const TASK_LIMIT = 600
 
 function kindColors(t: Theme, k: Kind) {
-  return k === "development" ? { fg: t.blue, bg: t.blueBg, border: t.blueBorder } : k === "marketing" ? { fg: t.orange, bg: t.orangeBg, border: t.orangeBorder } : { fg: t.mutedFg, bg: t.muted, border: t.border }
+  return k === "development" ? { fg: t.blue, bg: t.blueBg, border: t.blueBorder } : k === "marketing" ? { fg: t.orange, bg: t.orangeBg, border: t.orangeBorder } : k === "content" ? { fg: t.violet, bg: t.violetBg, border: t.violetBorder } : { fg: t.mutedFg, bg: t.muted, border: t.border }
 }
 
 // where a task stands: waiting for approval, approved (will run by itself), rejected, WAE Bot is working on it, or how its run ended
@@ -59,10 +59,11 @@ function ProgressIcon({ p, size = 18 }: { p: Progress; size?: number }) {
 const projectsOf = (t: Task): string[] => t.projects ?? (t.project ? [t.project] : [])
 
 // Why Approve cannot be pressed yet (empty = it can)
-function whyNot(t: Task, marketing: boolean): string {
-  if (t.kind === "other") return "Set the type to Development or Marketing first."
+function whyNot(t: Task, marketing: boolean, content: boolean): string {
+  if (t.kind === "other") return "Set the type to Development, Marketing or Content first."
   if (t.kind === "development" && projectsOf(t).length === 0) return "Choose at least one project first."
   if (t.kind === "marketing" && !marketing) return "There is no Marketing folder on the server."
+  if (t.kind === "content" && !content) return "There is no Content section on the server."
   if (!t.task.trim()) return "Write the task first."
   return ""
 }
@@ -74,6 +75,42 @@ function whenText(iso: string): string {
   } catch {
     return d.toLocaleString("en-IN")
   }
+}
+// inside the card of its day only the time is shown (the day is in the card's title)
+function timeText(iso: string): string {
+  const d = new Date(iso)
+  try {
+    return d.toLocaleTimeString(undefined, { timeStyle: "short" })
+  } catch {
+    return d.toLocaleTimeString("en-IN")
+  }
+}
+
+// ---- The meetings are shown one card per DAY (the day they arrived, in this phone's time), the newest day first; a day's card holds that day's meetings.
+// Same rules as the web page (components/wae-bot/meetings-panel.tsx there).
+const pad2 = (n: number) => String(n).padStart(2, "0")
+function dayKeyOf(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? "unknown" : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+function dayTitle(key: string, now: Date = new Date()): string {
+  if (key === "unknown") return "Earlier"
+  const [y, mo, da] = key.split("-").map(Number)
+  const nice = new Date(y, mo - 1, da).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" })
+  if (key === dayKeyOf(now.toISOString())) return `Today · ${nice}`
+  if (key === dayKeyOf(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).toISOString())) return `Yesterday · ${nice}`
+  return nice
+}
+// the meetings come newest first: the days and the meetings inside a day keep that order
+function groupByDay(list: Meeting[]): { key: string; meetings: Meeting[] }[] {
+  const groups: { key: string; meetings: Meeting[] }[] = []
+  for (const m of list) {
+    const key = dayKeyOf(m.receivedAt)
+    const g = groups.find((x) => x.key === key)
+    if (g) g.meetings.push(m)
+    else groups.push({ key, meetings: [m] })
+  }
+  return groups
 }
 
 export function MeetingsScreen({
@@ -95,6 +132,7 @@ export function MeetingsScreen({
   const [meetings, setMeetings] = useState<Meeting[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [marketing, setMarketing] = useState(false)
+  const [content, setContent] = useState(false) // the bot server has a Content section (a "Content" task runs there)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState("")
   const [editing, setEditing] = useState<{ meetingId: string; task: Task } | null>(null)
@@ -104,6 +142,7 @@ export function MeetingsScreen({
   const [starting, setStarting] = useState<Set<string>>(new Set())
   // many meetings pile up (one per day): the newest and the ones not seen yet are open, the others are folded to one line; a tap on the name folds / opens
   const [openIds, setOpenIds] = useState<Record<string, boolean>>({})
+  const [dayOpen, setDayOpen] = useState<Record<string, boolean>>({}) // a day's card: folded or open (the newest day and days with a new meeting start open)
   const openedToast = useRef(false)
 
   useEffect(() => {
@@ -129,6 +168,7 @@ export function MeetingsScreen({
       setMeetings(list)
       setProjects(Array.isArray(body.projects) ? body.projects : [])
       setMarketing(!!body.marketing)
+      setContent(!!body.content)
       setError("")
       // a meeting that arrived while the app is open: a system notification (the phone shows it as a banner), a toast on any tab, and the badge on
       // the tab. The same list of "already seen" meetings is used by the background task, so one meeting is announced once.
@@ -201,7 +241,7 @@ export function MeetingsScreen({
 
   // Approve: the task runs by itself in the background at its run time (right away when it has none)
   const approve = async (m: Meeting, task: Task) => {
-    if (whyNot(task, marketing) || starting.has(task.id)) return
+    if (whyNot(task, marketing, content) || starting.has(task.id)) return
     setStarting((prev) => new Set(prev).add(task.id))
     const out = await send("meeting-task-approve", { meetingId: m.id, taskId: task.id, model: bot.modelId, effort: bot.effortId, autoAllow: bot.autoAllow }, "Could not approve this task.")
     setStarting((prev) => {
@@ -267,14 +307,40 @@ export function MeetingsScreen({
           </View>
         ) : null}
 
-        {meetings.map((m, index) => {
+        {groupByDay(meetings).map((g, gi) => {
+          const dOpen = dayOpen[g.key] ?? (gi === 0 || g.meetings.some((x) => unreadIds.has(x.id)))
+          const DayChevron = dOpen ? ChevronDown : ChevronRight
+          const dc = { done: 0, running: 0, bad: 0, all: 0 }
+          for (const x of g.meetings) for (const task of x.tasks) { const p = prog(task); dc.all++; if (p === "done") dc.done++; else if (p === "running") dc.running++; else if (p === "error" || p === "stopped") dc.bad++ }
+          return (
+          <View key={g.key} style={{ borderWidth: 1, borderColor: t.border, backgroundColor: t.card, borderRadius: radius.lg, padding: 12, gap: 10 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={dOpen ? "Fold this day" : "Open this day"}
+              accessibilityState={{ expanded: dOpen }}
+              onPress={() => setDayOpen((prev) => ({ ...prev, [g.key]: !dOpen }))}
+              style={{ gap: 4 }}
+            >
+              <View style={s.row}>
+                <DayChevron size={18} color={t.mutedFg} />
+                {g.meetings.some((x) => unreadIds.has(x.id)) ? <View accessibilityLabel="New" style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: t.primary }} /> : null}
+                <Text style={{ flex: 1, color: t.fg, fontWeight: "700", fontSize: 17 }}>{dayTitle(g.key)}</Text>
+              </View>
+              <Text style={{ color: t.mutedFg, fontSize: 12, paddingLeft: 26 }}>
+                {g.meetings.length} {g.meetings.length === 1 ? "meeting" : "meetings"}
+                {dc.all > 0 ? <Text>{" · "}<Text style={{ color: t.fg, fontWeight: "600" }}>{dc.done}</Text>/{dc.all} completed</Text> : null}
+                {dc.running ? <Text style={{ color: t.blue }}> · {dc.running} running</Text> : null}
+                {dc.bad ? <Text style={{ color: t.destructive }}> · {dc.bad} failed/stopped</Text> : null}
+              </Text>
+            </Pressable>
+            {dOpen ? g.meetings.map((m) => {
           const counts = { todo: 0, approved: 0, rejected: 0, running: 0, done: 0, error: 0, stopped: 0 }
           for (const x of m.tasks) counts[prog(x)]++
           const total = m.tasks.length
-          const open = openIds[m.id] ?? (index === 0 || unreadIds.has(m.id))
+          const open = openIds[m.id] ?? true
           const Chevron = open ? ChevronDown : ChevronRight
           return (
-            <View key={m.id} style={{ borderWidth: 1, borderColor: t.border, backgroundColor: t.card, borderRadius: radius.lg, padding: 14, gap: 12 }}>
+            <View key={m.id} style={{ borderWidth: 1, borderColor: t.border, backgroundColor: t.bg, borderRadius: radius.md, padding: 12, gap: 12 }}>
               <View style={s.row}>
                 <Pressable
                   accessibilityRole="button"
@@ -289,7 +355,7 @@ export function MeetingsScreen({
                     <Text numberOfLines={open ? 2 : 1} style={{ flex: 1, color: t.fg, fontWeight: "600", fontSize: 16 }}>{m.name}</Text>
                   </View>
                   <Text style={{ color: t.mutedFg, fontSize: 12, paddingLeft: 26 }}>
-                    {SOURCE[m.source] || m.source} · {whenText(m.receivedAt)}
+                    {SOURCE[m.source] || m.source} · {timeText(m.receivedAt)}
                   </Text>
                   {total > 0 ? (
                     <View style={[s.row, { paddingLeft: 26, gap: 8 }]}>
@@ -313,7 +379,7 @@ export function MeetingsScreen({
               {m.tasks.map((task) => {
                 const kc = kindColors(t, task.kind)
                 const chat = task.runId ? bot.chatOfRun(task.runId) : undefined
-                const blocked = whyNot(task, marketing)
+                const blocked = whyNot(task, marketing, content)
                 const busy = starting.has(task.id)
                 const progress = prog(task)
                 const done = progress === "done"
@@ -327,6 +393,7 @@ export function MeetingsScreen({
                       <Text style={{ color: kc.fg, backgroundColor: kc.bg, borderColor: kc.border, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 3, fontSize: 12, fontWeight: "600", overflow: "hidden" }}>{KIND_LABEL[task.kind]}</Text>
                       {task.kind === "development" ? projectsOf(task).map((p) => <Pill key={p} text={p} />) : null}
                       {task.kind === "marketing" ? <Pill text="Marketing folder" /> : null}
+                      {task.kind === "content" ? <Pill text="Content section" /> : null}
                       {task.priority ? <Pill text={task.priority} /> : null}
                       {task.deadline ? <Pill text={`Due ${task.deadline}`} /> : null}
                       {task.runAt && task.status !== "started" ? <Pill text={`Run time ${whenText(task.runAt)}`} /> : null}
@@ -411,6 +478,9 @@ export function MeetingsScreen({
               </> : null}
             </View>
           )
+        }) : null}
+          </View>
+          )
         })}
       </ScrollView>
 
@@ -468,12 +538,12 @@ function TaskEditor({ task, projects, onClose, onSave }: { task: Task; projects:
   const togglePicked = (p: string) => setPicked((list) => (list.includes(p) ? list.filter((x) => x !== p) : [...list, p]))
   const label = { color: t.mutedFg, fontSize: 12 } as const
 
-  // only what was changed is sent, with the same rules as the page: a task that becomes Marketing has no project
+  // only what was changed is sent, with the same rules as the page: a task that becomes Marketing or Content has no project
   const patch: Partial<Task> = {}
   if (text.trim() !== task.task) patch.task = text.trim()
   if (kind !== task.kind) {
     patch.kind = kind
-    if (kind === "marketing") {
+    if (kind === "marketing" || kind === "content") {
       patch.project = ""
       patch.projects = []
     }

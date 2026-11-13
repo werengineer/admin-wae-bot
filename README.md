@@ -16,7 +16,8 @@ Product updates), same features. It is a private app, installed over a USB cable
   message (the chat goes back to it), Stop, Auto-allow, model and speed. The menu has Recents (with the dot for a chat that is answering, delete) and
   "Always allowed" (take a rule back). A run goes on **on the server** when the app is closed or in the background; when you come back, the app joins it
   again from the last event (this is why a native app: on the iPhone the web page lost the run when the screen changed).
-- **Meeting notes**: meetings from Wispr Flow arrive by themselves (a "New" tag and a number on the tab), split into tasks labelled Development / Marketing /
+- The Meeting notes list is one card per **day** (newest first); a day holds that day's meetings.
+- **Meeting notes**: meetings from Wispr Flow arrive by themselves (a "New" tag and a number on the tab), split into tasks labelled Development / Marketing / Content /
   Other. Edit a task with the pencil (type, project, deadline, priority; the employee is not editable), delete it, Approve / Reject (an approved task runs by itself at its run time), "Send to Sheet &
   Slack", paste notes by hand. Nothing starts by itself.
 - **Product updates**: what changed in all connected repos, written for the team, "Post to Slack".

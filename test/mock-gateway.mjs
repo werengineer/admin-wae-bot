@@ -66,7 +66,7 @@ http.createServer((req, res) => {
       case "sessions": return json(res, 200, sessions)
       case "models": return json(res, 200, { models: [{ id: "claude-sonnet-5-5", label: "Sonnet 5.5", group: "main" }, { id: "claude-opus-5-5", label: "Opus 5.5", group: "main" }], efforts: [{ id: "default", label: "Default" }, { id: "low", label: "Fast" }] })
       case "integrations": return json(res, 200, { sheet: true, slack: true })
-      case "meetings": return json(res, 200, { meetings, projects: [{ id: "academy", name: "Academy Admin" }, { id: "social", name: "WAE Social" }], marketing: true })
+      case "meetings": return json(res, 200, { meetings, projects: [{ id: "academy", name: "Academy Admin" }, { id: "social", name: "WAE Social" }], marketing: true, content: true })
       case "session-messages": return json(res, 200, { items: [{ kind: "user", text: "Enable background runs" }, { kind: "bot", text: "Done. Background runs are on." }] })
       case "meeting-update": {
         const m = meetings.find((x) => x.id === b.meetingId)
@@ -80,7 +80,7 @@ http.createServer((req, res) => {
       case "meeting-task-approve": {
         const t = meetings[0].tasks.find((x) => x.id === b.taskId)
         if (!t) return json(res, 404, { error: "Task not found." })
-        if (t.kind === "other") return json(res, 400, { error: "Set the type of this task to Development or Marketing first." })
+        if (t.kind === "other") return json(res, 400, { error: "Set the type of this task to Development, Marketing or Content first." })
         if ("runAt" in b) t.runAt = b.runAt || ""
         if (t.runAt && Date.parse(t.runAt) > Date.now()) { t.status = "approved"; return json(res, 200, { ok: true, status: "approved", runAt: t.runAt }) }
         t.status = "started"; t.runId = "run-new"

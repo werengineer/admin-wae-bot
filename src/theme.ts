@@ -7,12 +7,14 @@ const light = {
   primary: "#000000", onPrimary: "#ffffff", secondary: "#f5f5f5", destructive: "#ef4444", ok: "#16a34a", sidebar: "#fafafa",
   warnBg: "#fffbeb", warnBorder: "#fcd34d", warnText: "#92400e",
   blue: "#1d4ed8", blueBg: "#eff6ff", blueBorder: "#93c5fd", orange: "#c2410c", orangeBg: "#fff7ed", orangeBorder: "#fdba74",
+  violet: "#6d28d9", violetBg: "#f5f3ff", violetBorder: "#c4b5fd",
 }
 const dark: typeof light = {
   bg: "#0a0a0a", fg: "#fafafa", card: "#0a0a0a", muted: "#262626", mutedFg: "#a3a3a3", border: "#262626",
   primary: "#fafafa", onPrimary: "#171717", secondary: "#262626", destructive: "#f87171", ok: "#4ade80", sidebar: "#171717",
   warnBg: "#422006", warnBorder: "#854d0e", warnText: "#fde68a",
   blue: "#93c5fd", blueBg: "#172554", blueBorder: "#1e40af", orange: "#fdba74", orangeBg: "#431407", orangeBorder: "#9a3412",
+  violet: "#c4b5fd", violetBg: "#2e1065", violetBorder: "#5b21b6",
 }
 
 export type Theme = typeof light
